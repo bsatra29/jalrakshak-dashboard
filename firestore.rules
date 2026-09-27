@@ -1,0 +1,95 @@
+rules_version = '2';
+
+// JalRakshak dashboard rules.
+//
+// IMPORTANT: Firestore rules are per-PROJECT, not per-app. If the Android app
+// already has rules in this Firebase project, MERGE the blocks below into them
+// instead of deploying this file over the top. In particular the citizen app
+// needs its own `create` permission on /citizenReports (not granted here).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    // A government user is an account that has an officers/{uid} profile.
+    // Signing in alone is not enough; villagers using the mobile app are also
+    // signed in and must not be able to read unit data through this path.
+    function isOfficer() {
+      return signedIn() && exists(/databases/$(database)/documents/officers/$(request.auth.uid));
+    }
+    function onlyChanges(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // Profiles are managed by an administrator in the console / seed script.
+    match /officers/{uid} {
+      allow read: if isOfficer() || (signedIn() && request.auth.uid == uid);
+      allow write: if false;
+    }
+
+    // Units and their history are written by the units' sync service (Admin SDK).
+    match /units/{unitId} {
+      allow read: if isOfficer();
+      allow write: if false;
+
+      match /readings/{id}  { allow read: if isOfficer(); allow write: if false; }
+      match /chemTests/{id} { allow read: if isOfficer(); allow write: if false; }
+      match /maintenance/{id} {
+        allow read: if isOfficer();
+        allow create: if isOfficer() && request.resource.data.officerName is string;
+        allow update, delete: if false;
+      }
+    }
+
+    match /mineFeatures/{id} { allow read: if isOfficer(); allow write: if false; }
+    match /mineEvents/{id}   { allow read: if isOfficer(); allow write: if false; }
+
+    // Acknowledging is the only edit an officer can make to an alert.
+    match /alerts/{id} {
+      allow read: if isOfficer();
+      allow update: if isOfficer()
+        && resource.data.acknowledgedAt == null
+        && onlyChanges(['acknowledgedBy', 'acknowledgedByUid', 'acknowledgedAt'])
+        && request.resource.data.acknowledgedByUid == request.auth.uid;
+      allow create, delete: if false;
+    }
+
+    match /citizenReports/{id} {
+      allow read: if isOfficer();
+      allow update: if isOfficer()
+        && resource.data.acknowledgedAt == null
+        && onlyChanges(['acknowledgedBy', 'acknowledgedByUid', 'acknowledgedAt'])
+        && request.resource.data.acknowledgedByUid == request.auth.uid;
+      allow delete: if false;
+      // allow create: ... (the citizen mobile app's rule goes here)
+    }
+
+    match /fieldTests/{id} {
+      allow read: if isOfficer();
+      allow create: if isOfficer() && request.resource.data.status == 'pending';
+      allow update: if isOfficer()
+        && resource.data.status == 'pending'
+        && onlyChanges(['status', 'result', 'value', 'resultDate', 'enteredBy', 'notes']);
+      allow delete: if false;
+    }
+
+    match /cartridges/{id} {
+      allow read: if isOfficer();
+      allow update: if isOfficer() && onlyChanges(['disposal']);
+      allow create, delete: if false;
+    }
+
+    // Append-only. No update, no delete, for anyone, ever.
+    match /auditLog/{entry} {
+      allow read: if isOfficer();
+      allow create: if isOfficer() && request.resource.data.officerUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+    match /auditMeta/{doc} {
+      allow read: if isOfficer();
+      allow create, update: if isOfficer();
+      allow delete: if false;
+    }
+  }
+}
